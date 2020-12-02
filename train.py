@@ -9,11 +9,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Beta
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
+from competitive_rl import make_envs
 from utils import DrawLine
 
 parser = argparse.ArgumentParser(description='Train a PPO agent for the CarRacing-v0')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G', help='discount factor (default: 0.99)')
-parser.add_argument('--action-repeat', type=int, default=8, metavar='N', help='repeat action in N frames (default: 8)')
+parser.add_argument('--action-repeat', type=int, default=1, metavar='N', help='repeat action in N frames (default: 8)')
 parser.add_argument('--img-stack', type=int, default=4, metavar='N', help='stack N image in a state (default: 4)')
 parser.add_argument('--seed', type=int, default=0, metavar='N', help='random seed (default: 0)')
 parser.add_argument('--render', action='store_true', help='render the environment')
@@ -28,78 +29,8 @@ torch.manual_seed(args.seed)
 if use_cuda:
     torch.cuda.manual_seed(args.seed)
 
-transition = np.dtype([('s', np.float64, (args.img_stack, 96, 96)), ('a', np.float64, (3,)), ('a_logp', np.float64),
+transition = np.dtype([('s', np.float64, (args.img_stack, 96, 96)), ('a', np.float64, (2,)), ('a_logp', np.float64),
                        ('r', np.float64), ('s_', np.float64, (args.img_stack, 96, 96))])
-
-
-class Env():
-    """
-    Environment wrapper for CarRacing 
-    """
-
-    def __init__(self):
-        self.env = gym.make('CarRacing-v0')
-        self.env.seed(args.seed)
-        self.reward_threshold = self.env.spec.reward_threshold
-
-    def reset(self):
-        self.counter = 0
-        self.av_r = self.reward_memory()
-
-        self.die = False
-        img_rgb = self.env.reset()
-        img_gray = self.rgb2gray(img_rgb)
-        self.stack = [img_gray] * args.img_stack  # four frames for decision
-        return np.array(self.stack)
-
-    def step(self, action):
-        total_reward = 0
-        for i in range(args.action_repeat):
-            img_rgb, reward, die, _ = self.env.step(action)
-            # don't penalize "die state"
-            if die:
-                reward += 100
-            # green penalty
-            if np.mean(img_rgb[:, :, 1]) > 185.0:
-                reward -= 0.05
-            total_reward += reward
-            # if no reward recently, end the episode
-            done = True if self.av_r(reward) <= -0.1 else False
-            if done or die:
-                break
-        img_gray = self.rgb2gray(img_rgb)
-        self.stack.pop(0)
-        self.stack.append(img_gray)
-        assert len(self.stack) == args.img_stack
-        return np.array(self.stack), total_reward, done, die
-
-    def render(self, *arg):
-        self.env.render(*arg)
-
-    @staticmethod
-    def rgb2gray(rgb, norm=True):
-        # rgb image -> gray [0, 1]
-        gray = np.dot(rgb[..., :], [0.299, 0.587, 0.114])
-        if norm:
-            # normalize
-            gray = gray / 128. - 1.
-        return gray
-
-    @staticmethod
-    def reward_memory():
-        # record reward for last 100 steps
-        count = 0
-        length = 100
-        history = np.zeros(length)
-
-        def memory(reward):
-            nonlocal count
-            history[count] = reward
-            count = (count + 1) % length
-            return np.mean(history)
-
-        return memory
-
 
 class Net(nn.Module):
     """
@@ -124,8 +55,8 @@ class Net(nn.Module):
         )  # output shape (256, 1, 1)
         self.v = nn.Sequential(nn.Linear(256, 100), nn.ReLU(), nn.Linear(100, 1))
         self.fc = nn.Sequential(nn.Linear(256, 100), nn.ReLU())
-        self.alpha_head = nn.Sequential(nn.Linear(100, 3), nn.Softplus())
-        self.beta_head = nn.Sequential(nn.Linear(100, 3), nn.Softplus())
+        self.alpha_head = nn.Sequential(nn.Linear(100, 2), nn.Softplus())
+        self.beta_head = nn.Sequential(nn.Linear(100, 2), nn.Softplus())
         self.apply(self._weights_init)
 
     @staticmethod
@@ -223,7 +154,8 @@ class Agent():
 
 if __name__ == "__main__":
     agent = Agent()
-    env = Env()
+    env = make_envs(env_id="cCarRacing-v0",seed=args.seed,num_envs=1,action_repeat=args.action_repeat)
+    env = env.envs[0]
     if args.vis:
         draw_reward = DrawLine(env="car", title="PPO", xlabel="Episode", ylabel="Moving averaged episode reward")
 
@@ -236,7 +168,8 @@ if __name__ == "__main__":
 
         for t in range(1000):
             action, a_logp = agent.select_action(state)
-            state_, reward, done, die = env.step(action * np.array([2., 1., 1.]) + np.array([-1., 0., 0.]))
+            state_, reward, done, die = env.step(action * np.array([2., 2.]) + np.array([-1., -1.]))
+
             if args.render:
                 env.render()
             if agent.store((state, action, a_logp, reward, state_)):
@@ -253,6 +186,6 @@ if __name__ == "__main__":
                 draw_reward(xdata=i_ep, ydata=running_score)
             print('Ep {}\tLast score: {:.2f}\tMoving average score: {:.2f}'.format(i_ep, score, running_score))
             agent.save_param()
-        if running_score > env.reward_threshold:
-            print("Solved! Running reward is now {} and the last episode runs to {}!".format(running_score, score))
-            break
+        # if running_score > env.reward_threshold:
+        #     print("Solved! Running reward is now {} and the last episode runs to {}!".format(running_score, score))
+        #     break
