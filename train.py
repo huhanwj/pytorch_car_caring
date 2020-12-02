@@ -32,6 +32,62 @@ if use_cuda:
 transition = np.dtype([('s', np.float64, (args.img_stack, 96, 96)), ('a', np.float64, (2,)), ('a_logp', np.float64),
                        ('r', np.float64), ('s_', np.float64, (args.img_stack, 96, 96))])
 
+class Env():
+    """
+    Environment wrapper for CarRacing 
+    """
+
+    def __init__(self):
+        # self.env = gym.make('CarRacing-v0')
+        comp_envs = make_envs('cCarRacing-v0', num_envs=1, action_repeat=1)
+        self.env = comp_envs.envs[0]
+        self.env.seed(args.seed)
+        self.reward_threshold = 910
+
+    def reset(self):
+        self.counter = 0
+        self.av_r = self.reward_memory()
+
+        self.die = False
+        obs = self.env.reset()
+        return obs
+
+    def step(self, action):
+        total_reward = 0
+        for i in range(args.action_repeat):
+            obs, reward, die, _ = self.env.step(action)
+            # don't penalize "die state"
+            # if die:
+            #     reward += 100
+            # # green penalty
+            # if np.mean(obs[0, :, :]) > 155.0:
+            #     reward -= 0.05
+            total_reward += reward
+            # if no reward recently, end the episode
+            done = True if self.av_r(reward) <= -0.1 else False
+            if done or die:
+                break
+        return obs, total_reward, done, die
+
+    def render(self, *arg):
+        self.env.render(*arg)
+
+    @staticmethod
+    def reward_memory():
+        # record reward for last 100 steps
+        count = 0
+        length = 100
+        history = np.zeros(length)
+
+        def memory(reward):
+            nonlocal count
+            history[count] = reward
+            count = (count + 1) % length
+            return np.mean(history)
+
+        return memory
+
+
 class Net(nn.Module):
     """
     Actor-Critic Network for PPO
@@ -154,8 +210,7 @@ class Agent():
 
 if __name__ == "__main__":
     agent = Agent()
-    env = make_envs(env_id="cCarRacing-v0",seed=args.seed,num_envs=1,action_repeat=args.action_repeat)
-    env = env.envs[0]
+    env = Env()
     if args.vis:
         draw_reward = DrawLine(env="car", title="PPO", xlabel="Episode", ylabel="Moving averaged episode reward")
 
